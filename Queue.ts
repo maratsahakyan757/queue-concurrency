@@ -1,43 +1,100 @@
 import {  Message } from "./Database";
 
+type Node = {
+    message: Message
+    next?: Node
+}
+
+type KeyQueue = {
+    first: Node
+    last: Node
+    busy: boolean
+}
+
+type Owner = {
+    key: string
+    workerId: number
+}
+
 export class Queue {
-    private messages: Message[]
-    private inFlight: Map<string, { workerId: number, messageId: string }>
+    private queues: Map<string, KeyQueue>
+    private freeKeys: Set<string>
+    private taken: Map<string, Owner>
+    private size: number
 
     constructor() {
-        this.messages = []
-        this.inFlight = new Map()
+        this.queues = new Map()
+        this.freeKeys = new Set()
+        this.taken = new Map()
+        this.size = 0
     }
 
     Enqueue = (message: Message) => {
-        this.messages.push(message)
+        const node: Node = { message }
+        let queue = this.queues.get(message.key)
+        if (queue) {
+            queue.last.next = node
+            queue.last = node
+        } else {
+            queue = { first: node, last: node, busy: false }
+            this.queues.set(message.key, queue)
+        }
+        this.size++
+        if (!queue.busy) {
+            this.freeKeys.add(message.key)
+        }
     }
 
     Dequeue = (workerId: number): Message | undefined => {
-        const message = this.messages.find(m => !this.inFlight.has(m.key))
-        if (!message) {
+        const key = this.freeKeys.values().next().value
+        if (key === undefined) {
             return undefined
         }
-        this.inFlight.set(message.key, { workerId, messageId: message.id })
+        this.freeKeys.delete(key)
+        const queue = this.queues.get(key)!
+        const message = queue.first.message
+        queue.busy = true
+        this.taken.set(message.id, { key, workerId })
         return message
     }
 
-    Confirm = (workerId: number, messageId: string) => {
-        const index = this.messages.findIndex(m => m.id === messageId)
-        if (index === -1) {
-            return
+    Confirm = (workerId: number, messageId: string): boolean => {
+        const owner = this.giveBack(workerId, messageId)
+        if (!owner) {
+            return false
         }
-        const key = this.messages[index].key
-        const lock = this.inFlight.get(key)
-        if (!lock || lock.workerId !== workerId || lock.messageId !== messageId) {
-            return
+        const queue = this.queues.get(owner.key)!
+        this.size--
+        if (queue.first.next) {
+            queue.first = queue.first.next
+            this.freeKeys.add(owner.key)
+        } else {
+            this.queues.delete(owner.key)
         }
-        this.messages.splice(index, 1)
-        this.inFlight.delete(key)
+        return true
+    }
+
+    Release = (workerId: number, messageId: string): boolean => {
+        const owner = this.giveBack(workerId, messageId)
+        if (!owner) {
+            return false
+        }
+        this.freeKeys.add(owner.key)
+        return true
     }
 
     Size = () => {
-        return this.messages.length
+        return this.size
+    }
+
+    private giveBack = (workerId: number, messageId: string): Owner | undefined => {
+        const owner = this.taken.get(messageId)
+        if (!owner || owner.workerId !== workerId) {
+            return undefined
+        }
+        this.taken.delete(messageId)
+        this.queues.get(owner.key)!.busy = false
+        return owner
     }
 }
 
